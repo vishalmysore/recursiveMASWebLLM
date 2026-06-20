@@ -69,7 +69,7 @@ jobs:
             LIB_DIR=$(dirname "$RT")
             if [ ! -e "$LIB_DIR/libtvm.so" ]; then
               ln -sf libtvm_runtime.so "$LIB_DIR/libtvm.so"
-              echo "Created: $LIB_DIR/libtvm.so -> $RT"
+              echo "Created: $LIB_DIR/libtvm.so -> libtvm_runtime.so"
             fi
           done
           echo "=== libtvm*.so after symlink fix ==="
