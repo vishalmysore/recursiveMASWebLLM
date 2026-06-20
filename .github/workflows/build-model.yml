@@ -57,20 +57,21 @@ jobs:
           # Pin/adjust if the nightly index changes. CPU wheels are enough to COMPILE.
           pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
           pip install -U huggingface_hub
-          # libmlc_llm.so needs libtvm.so at load time. Diagnose + self-heal:
+          # mlc-llm's libmlc_llm.so needs libtvm.so, but the nightly only ships
+          # libtvm_runtime.so. Create a libtvm.so -> libtvm_runtime.so symlink IN EACH
+          # dir, so libmlc_llm_module.so resolves its OWN matching runtime (a single
+          # symlink to tvm/lib's runtime gives an ABI 'undefined symbol' error).
           SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          echo "=== all libtvm* files on runner ==="; find "$SP" -name "libtvm*" 2>/dev/null || true
-          # add every dir holding a libtvm* lib to the loader path (this + later steps)
+          echo "=== libtvm* before ==="; find "$SP" -name "libtvm*" 2>/dev/null || true
+          for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
+            D=$(dirname "$RT"); [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so";
+          done
+          echo "=== libtvm* after ==="; find "$SP" -name "libtvm*" 2>/dev/null || true
+          # sorted dirs put mlc_llm/lib first, so the module's own runtime wins
           TVM_DIRS=$(python -c "import glob,os,sysconfig; sp=sysconfig.get_paths()['purelib']; print(':'.join(sorted({os.path.dirname(p) for p in glob.glob(os.path.join(sp,'**','libtvm*'),recursive=True)})))")
           echo "TVM_DIRS=$TVM_DIRS"
           export LD_LIBRARY_PATH="$TVM_DIRS:$LD_LIBRARY_PATH"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-          # Fallback: if no real libtvm.so exists, symlink it to libtvm_runtime.so.
-          if ! find "$SP" -name "libtvm.so" | grep -q .; then
-            RT=$(find "$SP" -name "libtvm_runtime.so" | head -1)
-            if [ -n "$RT" ]; then ln -sf "$RT" "$(dirname "$RT")/libtvm.so"; echo "symlinked libtvm.so -> $RT"; fi
-          fi
-          python -c "import tvm; print('tvm', tvm.__file__)"
           python -c "import mlc_llm; print('mlc_llm', mlc_llm.__file__)"
 
       - name: Patch model definition (expose hidden states)
