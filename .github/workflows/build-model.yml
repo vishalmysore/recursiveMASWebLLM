@@ -9,6 +9,10 @@ name: Build RecursiveMAS model
 # run as a debugging pass. See README.md.
 
 on:
+  # Run automatically on pushes to the fix branch so the full build is exercised in CI.
+  push:
+    branches:
+      - copilot/fix-github-actions-build-job
   workflow_dispatch:
     inputs:
       model_hf:
@@ -36,6 +40,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    env:
+      MODEL_HF:   ${{ inputs.model_hf   || 'Qwen/Qwen2.5-0.5B-Instruct' }}
+      ARCH:       ${{ inputs.arch       || 'qwen2' }}
+      QUANT:      ${{ inputs.quant      || 'q4f16_1' }}
+      MODEL_NAME: ${{ inputs.name       || 'RecursiveMAS-0.5B' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,53 +69,66 @@ jobs:
           SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 
           echo "=== Before cleanup ==="
-          find "$SP" -name "libtvm*.so" | head -20
+          find "$SP" -name "libtvm*" 2>/dev/null || true
 
-          # Stronger deduplication: Keep ONLY mlc_llm's runtime and remove everything else.
-          # Both mlc-llm-nightly and mlc-ai-nightly ship libtvm_runtime.so and register the
-          # same TVM global functions (e.g. device_api.vulkan). Loading both causes a
-          # duplicate-registration crash (SIGABRT). Removing the tvm package's copies
-          # prevents any second registration from occurring.
+          # Keep Python 'tvm' package, only remove duplicate native libraries.
+          # Step 1: Remove conflicting runtime libs outside mlc_llm and tvm directories.
+          find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" ! -path "*/tvm/*" -delete || true
+          find "$SP" -name "libtvm_runtime_*.so" -delete || true   # extra variants
+
+          # Step 2: Replace tvm's own libtvm_runtime.so with a symlink to mlc_llm's copy
+          #         so only one native library is loaded (avoiding duplicate-registration SIGABRT).
           MLC_RT="$SP/mlc_llm/lib/libtvm_runtime.so"
-          if [ -f "$MLC_RT" ]; then
-            # Remove all other tvm runtime copies outside mlc_llm
-            find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" -delete
-            # Remove conflicting tvm package shared libs entirely
-            [ -d "$SP/tvm" ] && rm -rf "$SP/tvm" || true
+          TVM_RT="$SP/tvm/lib/libtvm_runtime.so"
 
-            # Recreate libtvm.so -> libtvm_runtime.so symlinks where missing
-            for dir in $(find "$SP" -name "libtvm_runtime.so" -exec dirname {} \;); do
-              ln -sf libtvm_runtime.so "$dir/libtvm.so"
-            done
+          if [ -f "$MLC_RT" ] && [ -f "$TVM_RT" ]; then
+            echo "Replacing duplicate tvm runtime with absolute symlink to mlc_llm copy..."
+            rm -f "$TVM_RT"
+            ln -sf "$MLC_RT" "$TVM_RT"
           fi
+
+          # Step 3: Create libtvm.so symlinks for remaining libtvm_runtime.so files.
+          for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
+            D=$(dirname "$RT")
+            [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so"
+          done
 
           echo "=== After cleanup ==="
           find "$SP" -name "libtvm*" 2>/dev/null || true
 
-          export LD_LIBRARY_PATH="$SP/mlc_llm/lib:$LD_LIBRARY_PATH"
+          # Prioritize mlc_llm libs
+          TVM_DIRS=$(python -c "
+          import glob, os, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*.so'), recursive=True)}
+          print(':'.join(sorted(dirs)))
+          ")
+
+          export LD_LIBRARY_PATH="${TVM_DIRS:+$TVM_DIRS:}$LD_LIBRARY_PATH"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
-          python -c "import mlc_llm; print('✅ mlc_llm imported successfully', mlc_llm.__file__)"
+          python -c "import tvm; print('✅ tvm imported', tvm.__file__)"
+          python -c "import mlc_llm; print('✅ mlc_llm imported', mlc_llm.__file__)"
 
       - name: Patch model definition (expose hidden states)
-        run: python expose_hidden.py --arch "${{ inputs.arch }}"
+        run: python expose_hidden.py --arch "$ARCH"
 
       - name: Download base weights
         run: |
-          hf download "${{ inputs.model_hf }}" --local-dir "hf/${{ inputs.name }}"
+          hf download "$MODEL_HF" --local-dir "hf/$MODEL_NAME"
 
       - name: convert_weight + gen_config + compile (WebGPU wasm)
         run: |
           set -e
-          OUT=dist-model; W="$OUT/${{ inputs.name }}-MLC"; L="$OUT/libs"
+          OUT=dist-model; W="$OUT/${MODEL_NAME}-MLC"; L="$OUT/libs"
           mkdir -p "$W" "$L"
-          mlc_llm convert_weight "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
-            --model-type "${{ inputs.arch }}" -o "$W"
-          mlc_llm gen_config "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
-            --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.arch }}" \
+          mlc_llm convert_weight "hf/$MODEL_NAME" --quantization "$QUANT" \
+            --model-type "$ARCH" -o "$W"
+          mlc_llm gen_config "hf/$MODEL_NAME" --quantization "$QUANT" \
+            --model-type "$ARCH" --conv-template "$ARCH" \
             --prefill-chunk-size 1024 -o "$W"
           mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
-            -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
+            -o "$L/${MODEL_NAME}-${QUANT}-webgpu.wasm"
           ls -la "$L" "$W"
 
       - name: Train RecursiveLink (optional, CPU)
@@ -114,7 +136,7 @@ jobs:
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
-          python train_recursivelink.py --model "${{ inputs.model_hf }}" \
+          python train_recursivelink.py --model "$MODEL_HF" \
             --out dist-model/recursivelink.json
 
       - name: Upload weights to Hugging Face (optional)
@@ -123,19 +145,19 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}     # add this repo secret
           HF_REPO:  ${{ vars.HF_REPO }}         # add this repo variable, e.g. you/RecursiveMAS-0.5B-MLC
         run: |
-          hf upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
+          hf upload "$HF_REPO" "dist-model/${MODEL_NAME}-MLC" . --token "$HF_TOKEN"
 
       - name: Upload build artifacts (wasm + weights + link)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.name }}-mlc
+          name: ${{ env.MODEL_NAME }}-mlc
           path: dist-model
           retention-days: 14
 
       - name: Attach wasm to a Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: model-${{ inputs.name }}
+          tag_name: model-${{ env.MODEL_NAME }}
           files: |
             dist-model/libs/*.wasm
             dist-model/recursivelink.json
