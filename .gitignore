@@ -1,0 +1,8 @@
+# build outputs / downloads (published to Releases + Hugging Face, not committed)
+hf/
+dist-model/
+*.wasm
+recursivelink.json
+__pycache__/
+*.pyc
+.DS_Store

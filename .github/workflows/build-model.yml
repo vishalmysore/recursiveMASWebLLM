@@ -1,0 +1,114 @@
+name: Build RecursiveMAS model
+
+# Compile a latent-transfer-capable WebLLM model on a (free, CPU) Ubuntu runner.
+# `mlc_llm compile` is code generation — it emits the WebGPU wasm WITHOUT needing a
+# GPU. convert_weight + gen_config also run on CPU for small models.
+#
+# ⚠️ BEST-EFFORT SCAFFOLD. The MLC nightly + emscripten install commonly needs a few
+# iterations to go green, and this can't be tested outside Actions. Treat the first
+# run as a debugging pass. See README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_hf:
+        description: "Base model on Hugging Face"
+        default: "Qwen/Qwen2.5-0.5B-Instruct"
+      arch:
+        description: "mlc_llm model arch (must match expose_hidden.py)"
+        default: "qwen2"
+      quant:
+        description: "Quantization"
+        default: "q4f16_1"
+      name:
+        description: "Output model name"
+        default: "RecursiveMAS-0.5B"
+      train_link:
+        description: "Also CPU-train the RecursiveLink (slow; default off)"
+        type: boolean
+        default: false
+      upload_hf:
+        description: "Upload weights to HF (needs HF_TOKEN secret + HF_REPO var)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with: { version: "3.1.56" }
+
+      - name: Install MLC toolchain (CPU nightly)
+        run: |
+          python -m pip install --upgrade pip
+          # Pin/adjust if the nightly index changes. CPU wheels are enough to COMPILE.
+          pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
+          pip install "huggingface_hub[cli]"
+          python -c "import mlc_llm, tvm; print('mlc_llm', mlc_llm.__file__)"
+
+      - name: Patch model definition (expose hidden states)
+        run: python expose_hidden.py --arch "${{ inputs.arch }}"
+
+      - name: Download base weights
+        run: |
+          huggingface-cli download "${{ inputs.model_hf }}" --local-dir "hf/${{ inputs.name }}"
+
+      - name: convert_weight + gen_config + compile (WebGPU wasm)
+        run: |
+          set -e
+          OUT=dist-model; W="$OUT/${{ inputs.name }}-MLC"; L="$OUT/libs"
+          mkdir -p "$W" "$L"
+          mlc_llm convert_weight "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
+            --model-type "${{ inputs.arch }}" -o "$W"
+          mlc_llm gen_config "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
+            --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.arch }}" \
+            --prefill-chunk-size 1024 -o "$W"
+          mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
+            -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
+          ls -la "$L" "$W"
+
+      - name: Train RecursiveLink (optional, CPU)
+        if: ${{ inputs.train_link }}
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers
+          python train_recursivelink.py --model "${{ inputs.model_hf }}" \
+            --out dist-model/recursivelink.json
+
+      - name: Upload weights to Hugging Face (optional)
+        if: ${{ inputs.upload_hf }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}     # add this repo secret
+          HF_REPO:  ${{ vars.HF_REPO }}         # add this repo variable, e.g. you/RecursiveMAS-0.5B-MLC
+        run: |
+          huggingface-cli upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
+
+      - name: Upload build artifacts (wasm + weights + link)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.name }}-mlc
+          path: dist-model
+          retention-days: 14
+
+      - name: Attach wasm to a Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: model-${{ inputs.name }}
+          files: |
+            dist-model/libs/*.wasm
+            dist-model/recursivelink.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
