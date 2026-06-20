@@ -60,33 +60,44 @@ jobs:
           SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 
           echo "=== Before cleanup ==="
-          find "$SP" -name "libtvm*.so" | head -20
+          find "$SP" -name "libtvm*" 2>/dev/null || true
 
-          # Stronger deduplication: Keep ONLY mlc_llm's runtime and remove everything else.
-          # Both mlc-llm-nightly and mlc-ai-nightly ship libtvm_runtime.so and register the
-          # same TVM global functions (e.g. device_api.vulkan). Loading both causes a
-          # duplicate-registration crash (SIGABRT). Removing the tvm package's copies
-          # prevents any second registration from occurring.
+          # Keep Python 'tvm' package, only remove duplicate native libraries
           MLC_RT="$SP/mlc_llm/lib/libtvm_runtime.so"
-          if [ -f "$MLC_RT" ]; then
-            # Remove all other tvm runtime copies outside mlc_llm
-            find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" -delete
-            # Remove conflicting tvm package shared libs entirely
-            [ -d "$SP/tvm" ] && rm -rf "$SP/tvm" || true
+          TVM_RT="$SP/tvm/lib/libtvm_runtime.so"
 
-            # Recreate libtvm.so -> libtvm_runtime.so symlinks where missing
-            for dir in $(find "$SP" -name "libtvm_runtime.so" -exec dirname {} \;); do
-              ln -sf libtvm_runtime.so "$dir/libtvm.so"
-            done
+          if [ -f "$MLC_RT" ] && [ -f "$TVM_RT" ]; then
+            echo "Removing duplicate tvm runtime and creating absolute symlink..."
+            rm -f "$TVM_RT"
+            ln -sf "$MLC_RT" "$TVM_RT"
           fi
+
+          # Create libtvm.so symlinks where needed
+          for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
+            D=$(dirname "$RT")
+            [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so"
+          done
+
+          # Remove other conflicting runtime libs (but keep tvm Python package)
+          find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" -delete || true
+          find "$SP" -name "libtvm_runtime_*.so" -delete || true   # extra variants
 
           echo "=== After cleanup ==="
           find "$SP" -name "libtvm*" 2>/dev/null || true
 
-          export LD_LIBRARY_PATH="$SP/mlc_llm/lib:$LD_LIBRARY_PATH"
+          # Prioritize mlc_llm libs
+          TVM_DIRS=$(python -c "
+import glob, os, sysconfig
+sp = sysconfig.get_paths()['purelib']
+dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*'), recursive=True)}
+print(':'.join(sorted(dirs)))
+          ")
+
+          export LD_LIBRARY_PATH="$TVM_DIRS:$LD_LIBRARY_PATH"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
-          python -c "import mlc_llm; print('✅ mlc_llm imported successfully', mlc_llm.__file__)"
+          python -c "import tvm; print('✅ tvm imported', tvm.__file__)"
+          python -c "import mlc_llm; print('✅ mlc_llm imported', mlc_llm.__file__)"
 
       - name: Patch model definition (expose hidden states)
         run: python expose_hidden.py --arch "${{ inputs.arch }}"
