@@ -29,9 +29,8 @@ python -c "import mlc_llm; print('mlc_llm at', mlc_llm.__file__)"
 echo "    >>> Make sure you applied expose_hidden.md to this mlc_llm's $ARCH model file. <<<"
 
 echo "==> 1. Download base weights"
-# huggingface-cli download "$MODEL_HF" --local-dir "./hf/$NAME"
 HF_DIR="./hf/$NAME"
-python -m huggingface_hub.commands.huggingface_cli download "$MODEL_HF" --local-dir "$HF_DIR"
+hf download "$MODEL_HF" --local-dir "$HF_DIR"   # huggingface_hub 1.x CLI
 
 echo "==> 2. convert_weight  (HF -> MLC params)"
 mlc_llm convert_weight "$HF_DIR" \

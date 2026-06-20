@@ -56,15 +56,24 @@ jobs:
           python -m pip install --upgrade pip
           # Pin/adjust if the nightly index changes. CPU wheels are enough to COMPILE.
           pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
-          pip install "huggingface_hub[cli]"
-          python -c "import mlc_llm, tvm; print('mlc_llm', mlc_llm.__file__)"
+          pip install -U huggingface_hub
+          # libmlc_llm.so needs libtvm.so at load time; the nightly doesn't put it on
+          # the loader path. Locate it and export LD_LIBRARY_PATH for this + later steps.
+          TVM_SO=$(python -c "import glob,os,sysconfig; sp=sysconfig.get_paths()['purelib']; h=sorted(glob.glob(os.path.join(sp,'**','libtvm*.so'),recursive=True)); print(h[0] if h else '')")
+          echo "libtvm.so -> ${TVM_SO:-NOT FOUND}"
+          if [ -z "$TVM_SO" ]; then echo "libtvm.so not found"; exit 1; fi
+          TVM_DIR=$(dirname "$TVM_SO")
+          export LD_LIBRARY_PATH="$TVM_DIR:$LD_LIBRARY_PATH"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          python -c "import tvm; print('tvm', tvm.__file__)"
+          python -c "import mlc_llm; print('mlc_llm', mlc_llm.__file__)"
 
       - name: Patch model definition (expose hidden states)
         run: python expose_hidden.py --arch "${{ inputs.arch }}"
 
       - name: Download base weights
         run: |
-          huggingface-cli download "${{ inputs.model_hf }}" --local-dir "hf/${{ inputs.name }}"
+          hf download "${{ inputs.model_hf }}" --local-dir "hf/${{ inputs.name }}"
 
       - name: convert_weight + gen_config + compile (WebGPU wasm)
         run: |
@@ -94,7 +103,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}     # add this repo secret
           HF_REPO:  ${{ vars.HF_REPO }}         # add this repo variable, e.g. you/RecursiveMAS-0.5B-MLC
         run: |
-          huggingface-cli upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
+          hf upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
 
       - name: Upload build artifacts (wasm + weights + link)
         uses: actions/upload-artifact@v4
