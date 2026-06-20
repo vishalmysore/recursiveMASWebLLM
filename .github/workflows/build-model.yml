@@ -89,13 +89,13 @@ jobs:
 
           # Prioritize mlc_llm libs
           TVM_DIRS=$(python -c "
-import glob, os, sysconfig
-sp = sysconfig.get_paths()['purelib']
-dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*.so'), recursive=True)}
-print(':'.join(sorted(dirs)))
+          import glob, os, sysconfig
+          sp = sysconfig.get_paths()['purelib']
+          dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*.so'), recursive=True)}
+          print(':'.join(sorted(dirs)))
           ")
 
-          export LD_LIBRARY_PATH="$TVM_DIRS:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="${TVM_DIRS:+$TVM_DIRS:}$LD_LIBRARY_PATH"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
           python -c "import tvm; print('✅ tvm imported', tvm.__file__)"
