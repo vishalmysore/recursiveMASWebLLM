@@ -62,25 +62,27 @@ jobs:
           echo "=== Before cleanup ==="
           find "$SP" -name "libtvm*" 2>/dev/null || true
 
-          # Keep Python 'tvm' package, only remove duplicate native libraries
+          # Keep Python 'tvm' package, only remove duplicate native libraries.
+          # Step 1: Remove conflicting runtime libs outside mlc_llm and tvm directories.
+          find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" ! -path "*/tvm/*" -delete || true
+          find "$SP" -name "libtvm_runtime_*.so" -delete || true   # extra variants
+
+          # Step 2: Replace tvm's own libtvm_runtime.so with a symlink to mlc_llm's copy
+          #         so only one native library is loaded (avoiding duplicate-registration SIGABRT).
           MLC_RT="$SP/mlc_llm/lib/libtvm_runtime.so"
           TVM_RT="$SP/tvm/lib/libtvm_runtime.so"
 
           if [ -f "$MLC_RT" ] && [ -f "$TVM_RT" ]; then
-            echo "Removing duplicate tvm runtime and creating absolute symlink..."
+            echo "Replacing duplicate tvm runtime with absolute symlink to mlc_llm copy..."
             rm -f "$TVM_RT"
             ln -sf "$MLC_RT" "$TVM_RT"
           fi
 
-          # Create libtvm.so symlinks where needed
+          # Step 3: Create libtvm.so symlinks for remaining libtvm_runtime.so files.
           for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
             D=$(dirname "$RT")
             [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so"
           done
-
-          # Remove other conflicting runtime libs (but keep tvm Python package)
-          find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" -delete || true
-          find "$SP" -name "libtvm_runtime_*.so" -delete || true   # extra variants
 
           echo "=== After cleanup ==="
           find "$SP" -name "libtvm*" 2>/dev/null || true
@@ -89,7 +91,7 @@ jobs:
           TVM_DIRS=$(python -c "
 import glob, os, sysconfig
 sp = sysconfig.get_paths()['purelib']
-dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*'), recursive=True)}
+dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(sp, '**', 'libtvm*.so'), recursive=True)}
 print(':'.join(sorted(dirs)))
           ")
 
