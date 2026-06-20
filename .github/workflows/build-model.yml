@@ -57,11 +57,23 @@ jobs:
           # Pin/adjust if the nightly index changes. CPU wheels are enough to COMPILE.
           pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
           pip install -U huggingface_hub
-          # libmlc_llm.so needs libtvm.so at load time; it lives in the tvm package,
-          # a different dir than mlc_llm/lib (which only has libtvm_runtime.so). Add
-          # EVERY dir holding a libtvm*.so to the loader path, for this + later steps.
+          # libmlc_llm.so links against libtvm.so at load time, but the nightly wheels
+          # only ship libtvm_runtime.so.  Create a libtvm.so symlink in every directory
+          # that has libtvm_runtime.so but no libtvm.so, then add all those dirs to
+          # LD_LIBRARY_PATH so the dynamic linker can resolve the dependency.
           SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          echo "=== libtvm*.so present on runner ==="; find "$SP" -name "libtvm*.so" 2>/dev/null || true
+          echo "=== libtvm*.so before symlink fix ==="
+          find "$SP" -name "libtvm*.so" 2>/dev/null || true
+          # Create libtvm.so -> libtvm_runtime.so symlinks where missing
+          for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
+            LIB_DIR=$(dirname "$RT")
+            if [ ! -e "$LIB_DIR/libtvm.so" ]; then
+              ln -sf "$RT" "$LIB_DIR/libtvm.so"
+              echo "Created: $LIB_DIR/libtvm.so -> $RT"
+            fi
+          done
+          echo "=== libtvm*.so after symlink fix ==="
+          find "$SP" -name "libtvm*.so" 2>/dev/null || true
           TVM_DIRS=$(python -c "import glob,os,sysconfig; sp=sysconfig.get_paths()['purelib']; print(':'.join(sorted({os.path.dirname(p) for p in glob.glob(os.path.join(sp,'**','libtvm*.so'),recursive=True)})))")
           echo "TVM_DIRS=$TVM_DIRS"
           if [ -z "$TVM_DIRS" ]; then echo "no libtvm found"; exit 1; fi
