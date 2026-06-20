@@ -68,7 +68,7 @@ jobs:
           for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
             LIB_DIR=$(dirname "$RT")
             if [ ! -e "$LIB_DIR/libtvm.so" ]; then
-              ln -sf "$RT" "$LIB_DIR/libtvm.so"
+              ln -sf libtvm_runtime.so "$LIB_DIR/libtvm.so"
               echo "Created: $LIB_DIR/libtvm.so -> $RT"
             fi
           done
