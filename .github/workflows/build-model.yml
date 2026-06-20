@@ -57,17 +57,27 @@ jobs:
           # Pin/adjust if the nightly index changes. CPU wheels are enough to COMPILE.
           pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
           pip install -U huggingface_hub
-          # mlc-llm's libmlc_llm.so needs libtvm.so, but the nightly only ships
-          # libtvm_runtime.so. Create a libtvm.so -> libtvm_runtime.so symlink IN EACH
-          # dir, so libmlc_llm_module.so resolves its OWN matching runtime (a single
-          # symlink to tvm/lib's runtime gives an ABI 'undefined symbol' error).
           SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
           echo "=== libtvm* before ==="; find "$SP" -name "libtvm*" 2>/dev/null || true
+          # mlc-llm-nightly ships mlc_llm/lib/libtvm_runtime.so and mlc-ai-nightly
+          # ships tvm/lib/libtvm_runtime.so. Both register the same TVM global
+          # functions; loading both causes a duplicate-registration crash (SIGABRT).
+          # Fix: replace tvm/lib/libtvm_runtime.so with an absolute symlink to
+          # mlc_llm's copy so glibc's dlopen() deduplicates by realpath/inode and
+          # only one registration ever happens.
+          MLC_RT="$SP/mlc_llm/lib/libtvm_runtime.so"
+          TVM_RT="$SP/tvm/lib/libtvm_runtime.so"
+          if [ -f "$MLC_RT" ] && [ -f "$TVM_RT" ]; then
+            rm -f "$TVM_RT"
+            ln -sf "$MLC_RT" "$TVM_RT"
+          fi
+          # Create libtvm.so -> libtvm_runtime.so symlinks where missing, so that
+          # libmlc_llm_module.so can resolve libtvm.so via LD_LIBRARY_PATH.
           for RT in $(find "$SP" -name "libtvm_runtime.so" 2>/dev/null); do
             D=$(dirname "$RT"); [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so";
           done
           echo "=== libtvm* after ==="; find "$SP" -name "libtvm*" 2>/dev/null || true
-          # sorted dirs put mlc_llm/lib first, so the module's own runtime wins
+          # mlc_llm/lib sorts first (m < t), so its runtime is found first.
           TVM_DIRS=$(python -c "import glob,os,sysconfig; sp=sysconfig.get_paths()['purelib']; print(':'.join(sorted({os.path.dirname(p) for p in glob.glob(os.path.join(sp,'**','libtvm*'),recursive=True)})))")
           echo "TVM_DIRS=$TVM_DIRS"
           export LD_LIBRARY_PATH="$TVM_DIRS:$LD_LIBRARY_PATH"
