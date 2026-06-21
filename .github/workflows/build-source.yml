@@ -39,9 +39,9 @@ jobs:
           echo "libPolly.a: $(find /usr/lib -name 'libPolly.a' 2>/dev/null | head -1 || echo MISSING)"
           echo "llvm-config: $(llvm-config --version)"
 
-      - name: Install Rust (for tokenizers)
+      - name: Install Rust 1.81.0 (for tokenizers; newer Rust errors on v0.19 code)
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.81.0
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup emscripten
@@ -79,7 +79,7 @@ jobs:
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
           set -e
-          rustup update stable && rustup default stable
+          rustup default 1.81.0
           cargo --version
           cd mlc-llm
           mkdir -p build
