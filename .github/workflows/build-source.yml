@@ -39,9 +39,9 @@ jobs:
           echo "libPolly.a: $(find /usr/lib -name 'libPolly.a' 2>/dev/null | head -1 || echo MISSING)"
           echo "llvm-config: $(llvm-config --version)"
 
-      - name: Install Rust 1.81.0 (for tokenizers; newer Rust errors on v0.19 code)
+      - name: Install Rust (latest stable; modern deps need >=1.85)
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.81.0
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup emscripten
@@ -79,8 +79,12 @@ jobs:
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
           set -e
-          rustup default 1.81.0
           cargo --version
+          # v0.19 tokenizers-c trips the deny-by-default 'dangerous_implicit_autorefs'
+          # lint on modern Rust. Cap lints to allow for that crate's cargo build.
+          sed -i 's|set(TOKENIZERS_CPP_RUST_FLAGS "")|set(TOKENIZERS_CPP_RUST_FLAGS "--cap-lints=allow")|' \
+            mlc-llm/3rdparty/tokenizers-cpp/CMakeLists.txt
+          grep -n TOKENIZERS_CPP_RUST_FLAGS mlc-llm/3rdparty/tokenizers-cpp/CMakeLists.txt | head -1
           cd mlc-llm
           mkdir -p build
           {
