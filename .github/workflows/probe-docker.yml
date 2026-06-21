@@ -8,7 +8,7 @@ on: { workflow_dispatch: {} }
 jobs:
   probe:
     runs-on: ubuntu-latest
-    container: mlcaidev/ci-cpu:26d65cc
+    container: mlcaidev/package-cpu:655adb5
     steps:
       - name: Inspect image toolchain
         run: |
