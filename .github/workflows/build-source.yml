@@ -1,17 +1,19 @@
 name: Build model from source
 
-# Last-resort path: the published MLC wheels/conda are currently ABI-broken, so we
-# build TVM + mlc-llm FROM SOURCE (self-consistent), then compile the WebGPU model.
-# ~1h build. CPU only — `mlc_llm compile --device webgpu` is codegen (emcc), no GPU.
+# The current MLC HEAD/nightlies are broken by an in-progress apache-tvm-ffi
+# migration (wheels: ABI mismatch; source HEAD: duplicate tvm-ffi registration).
+# So we pin mlc-llm v0.19.0 — the last stable PRE-migration release — and build
+# TVM + mlc-llm from source the classic way (self-consistent). CPU only;
+# `mlc_llm compile --device webgpu` is codegen (emcc), no GPU needed. ~45 min.
 
 on:
   workflow_dispatch:
     inputs:
-      model_hf: { description: "Base model", default: "Qwen/Qwen2.5-0.5B-Instruct" }
-      arch:     { description: "arch",       default: "qwen2" }
-      quant:    { description: "quant",      default: "q4f16_1" }
-      name:     { description: "output name",default: "RecursiveMAS-0.5B" }
-      upload_hf: { description: "upload to HF", type: boolean, default: true }
+      model_hf:  { description: "Base model", default: "Qwen/Qwen2.5-0.5B-Instruct" }
+      arch:      { description: "arch",       default: "qwen2" }
+      quant:     { description: "quant",      default: "q4f16_1" }
+      name:      { description: "output name",default: "RecursiveMAS-0.5B" }
+      upload_hf: { description: "upload to HF",type: boolean, default: true }
 
 jobs:
   build:
@@ -41,22 +43,32 @@ jobs:
         uses: mymindstorm/setup-emsdk@v14
         with: { version: "3.1.56" }
 
-      - name: Clone mlc-llm (recursive)
-        run: git clone --recursive --depth 1 --shallow-submodules https://github.com/mlc-ai/mlc-llm.git
+      - name: Clone mlc-llm v0.19.0 (classic, pre-tvm-ffi)
+        run: git clone --branch v0.19.0 --depth 1 --recursive --shallow-submodules https://github.com/mlc-ai/mlc-llm.git
 
-      - name: Build + install full TVM (scikit-build, with LLVM) — the long step
+      - name: Build TVM from source + install tvm python (~35 min)
         run: |
           set -e
+          cd mlc-llm/3rdparty/tvm
+          mkdir -p build
+          cp cmake/config.cmake build/config.cmake
+          {
+            echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)'
+            echo 'set(USE_LLVM "llvm-config --link-static")'
+            echo 'set(HIDE_PRIVATE_SYMBOLS ON)'
+            echo 'set(USE_CUDA OFF)'; echo 'set(USE_METAL OFF)'
+            echo 'set(USE_VULKAN OFF)'; echo 'set(USE_OPENCL OFF)'
+          } >> build/config.cmake
+          (cd build && cmake .. -G Ninja && ninja)
+          echo "TVM_HOME=$PWD" >> "$GITHUB_ENV"
+          echo "TVM_LIBRARY_PATH=$PWD/build" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PWD/build:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           pip install --upgrade pip
-          export CMAKE_ARGS="-DUSE_LLVM=ON -DHIDE_PRIVATE_SYMBOLS=ON -DUSE_CUDA=OFF -DUSE_VULKAN=OFF -DUSE_METAL=OFF -DUSE_OPENCL=OFF"
-          pip install -v -e ./mlc-llm/3rdparty/tvm
+          export TVM_LIBRARY_PATH="$PWD/build"
+          pip install -e ./python
           python -c "import tvm; print('TVM_OK', tvm.__file__)"
-          # locate the full libtvm.so so libmlc_llm.so resolves THIS one (single TVM)
-          TVM_LIB_DIR=$(python -c "import os,glob,sysconfig; sp=sysconfig.get_paths()['purelib']; h=[d for d in glob.glob(os.path.join(sp,'**','libtvm.so'),recursive=True)]; print(os.path.dirname(h[0]) if h else '')")
-          echo "TVM_LIB_DIR=$TVM_LIB_DIR"; find "$(python -c "import sysconfig;print(sysconfig.get_paths()['purelib'])")" -name "libtvm*.so" 2>/dev/null | head
-          echo "LD_LIBRARY_PATH=$TVM_LIB_DIR:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
-      - name: Build mlc-llm C++ libs + install python
+      - name: Build mlc-llm from source + install python
         run: |
           set -e
           cd mlc-llm
@@ -65,6 +77,7 @@ jobs:
             echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)'
             echo 'set(USE_LLVM "llvm-config --link-static")'
             echo 'set(HIDE_PRIVATE_SYMBOLS ON)'
+            echo "set(TVM_SOURCE_DIR $PWD/3rdparty/tvm)"
             echo 'set(USE_CUDA OFF)'; echo 'set(USE_METAL OFF)'
             echo 'set(USE_VULKAN OFF)'; echo 'set(USE_OPENCL OFF)'
           } > build/config.cmake
