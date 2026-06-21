@@ -41,34 +41,34 @@ jobs:
         uses: mymindstorm/setup-emsdk@v14
         with: { version: "3.1.56" }
 
-      - name: Clone mlc-llm (recursive) + build TVM + mlc-llm
+      - name: Clone mlc-llm (recursive)
+        run: git clone --recursive --depth 1 --shallow-submodules https://github.com/mlc-ai/mlc-llm.git
+
+      - name: Build + install full TVM (scikit-build, with LLVM) — the long step
         run: |
           set -e
-          git clone --recursive --depth 1 https://github.com/mlc-ai/mlc-llm.git
+          pip install --upgrade pip
+          export CMAKE_ARGS="-DUSE_LLVM=ON -DHIDE_PRIVATE_SYMBOLS=ON -DUSE_CUDA=OFF -DUSE_VULKAN=OFF -DUSE_METAL=OFF -DUSE_OPENCL=OFF"
+          pip install -v -e ./mlc-llm/3rdparty/tvm
+          python -c "import tvm; print('TVM_OK', tvm.__file__)"
+          # locate the full libtvm.so so libmlc_llm.so resolves THIS one (single TVM)
+          TVM_LIB_DIR=$(python -c "import os,glob,sysconfig; sp=sysconfig.get_paths()['purelib']; h=[d for d in glob.glob(os.path.join(sp,'**','libtvm.so'),recursive=True)]; print(os.path.dirname(h[0]) if h else '')")
+          echo "TVM_LIB_DIR=$TVM_LIB_DIR"; find "$(python -c "import sysconfig;print(sysconfig.get_paths()['purelib'])")" -name "libtvm*.so" 2>/dev/null | head
+          echo "LD_LIBRARY_PATH=$TVM_LIB_DIR:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Build mlc-llm C++ libs + install python
+        run: |
+          set -e
           cd mlc-llm
           mkdir -p build
           {
             echo 'set(CMAKE_BUILD_TYPE RelWithDebInfo)'
             echo 'set(USE_LLVM "llvm-config --link-static")'
             echo 'set(HIDE_PRIVATE_SYMBOLS ON)'
-            echo 'set(USE_CUDA OFF)'
-            echo 'set(USE_METAL OFF)'
-            echo 'set(USE_VULKAN OFF)'
-            echo 'set(USE_OPENCL OFF)'
+            echo 'set(USE_CUDA OFF)'; echo 'set(USE_METAL OFF)'
+            echo 'set(USE_VULKAN OFF)'; echo 'set(USE_OPENCL OFF)'
           } > build/config.cmake
-          cd build
-          cmake .. -G Ninja
-          ninja
-          echo "=== built libs ==="; ls -la *.so 2>/dev/null || ls -la
-
-      - name: Install python packages (tvm + mlc_llm, editable)
-        run: |
-          set -e
-          cd mlc-llm
-          export TVM_LIBRARY_PATH="$PWD/build"
-          echo "TVM_LIBRARY_PATH=$TVM_LIBRARY_PATH" >> "$GITHUB_ENV"
-          pip install --upgrade pip
-          pip install -e ./3rdparty/tvm/python
+          (cd build && cmake .. -G Ninja && ninja)
           pip install -e ./python
           pip install -U huggingface_hub
           python -c "import tvm; print('TVM_OK', tvm.__file__)"
