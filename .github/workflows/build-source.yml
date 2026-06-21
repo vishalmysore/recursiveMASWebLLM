@@ -32,6 +32,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build build-essential git \
             llvm-dev libedit-dev libxml2-dev zlib1g-dev libssl-dev
+          # TVM static-links LLVM incl. Polly; llvm-dev doesn't ship libPolly.a
+          LV=$(llvm-config --version | cut -d. -f1)
+          echo "LLVM major: $LV"
+          sudo apt-get install -y "libpolly-${LV}-dev" || sudo apt-get install -y libpolly-18-dev || true
+          echo "libPolly.a: $(find /usr/lib -name 'libPolly.a' 2>/dev/null | head -1 || echo MISSING)"
           echo "llvm-config: $(llvm-config --version)"
 
       - name: Install Rust (for tokenizers)
