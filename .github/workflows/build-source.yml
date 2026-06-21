@@ -74,8 +74,13 @@ jobs:
           python -c "import tvm; print('TVM_OK', tvm.__file__)"
 
       - name: Build mlc-llm from source + install python
+        env:
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
           set -e
+          rustup update stable && rustup default stable
+          cargo --version
           cd mlc-llm
           mkdir -p build
           {
