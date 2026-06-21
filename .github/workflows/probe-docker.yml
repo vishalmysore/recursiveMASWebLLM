@@ -1,0 +1,21 @@
+name: Probe MLC docker image
+
+# Does mlcaidev/ci-cpu already have a working tvm + mlc_llm (or the toolchain to
+# build them)? If so we build the model inside this container and skip pip/conda.
+
+on: { workflow_dispatch: {} }
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    container: mlcaidev/ci-cpu:26d65cc
+    steps:
+      - name: Inspect image toolchain
+        run: |
+          echo "=== python ==="; python3 --version; which python3
+          echo "=== mlc/tvm pip pkgs ==="; pip3 list 2>/dev/null | grep -iE "mlc|tvm|apache" || echo "(none installed)"
+          echo "=== TVM_HOME ==="; echo "TVM_HOME=${TVM_HOME:-unset}"; ls -la "${TVM_HOME:-/nonexistent}" 2>/dev/null | head -5 || true
+          echo "=== import tvm ==="; python3 -c "import tvm; print('TVM_OK', tvm.__file__)" 2>&1 | tail -3
+          echo "=== import mlc_llm ==="; python3 -c "import mlc_llm; print('MLC_OK', mlc_llm.__file__)" 2>&1 | tail -3
+          echo "=== mlc_llm cli ==="; (which mlc_llm && mlc_llm --help 2>&1 | head -2) || python3 -m mlc_llm --help 2>&1 | head -2 || echo "(no cli)"
+          echo "=== build tools ==="; (emcc --version 2>&1 | head -1) || echo "no emcc"; (cmake --version | head -1) || echo "no cmake"; (llvm-config --version 2>&1) || echo "no llvm-config"; (rustc --version 2>&1) || echo "no rustc"
