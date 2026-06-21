@@ -11,7 +11,7 @@ on:
       arch:     { description: "arch",       default: "qwen2" }
       quant:    { description: "quant",      default: "q4f16_1" }
       name:     { description: "output name",default: "RecursiveMAS-0.5B" }
-      upload_hf:{ description: "upload to HF",type: boolean, default: true }
+      upload_hf: { description: "upload to HF", type: boolean, default: true }
 
 jobs:
   build:
