@@ -1,0 +1,64 @@
+name: Probe MLC install combos
+
+# Fast probe: which install combo gives a WORKING `import mlc_llm` AND `import tvm`
+# (both are needed — tvm for the compile step). No model download/compile. Read the
+# RESULT_* markers in the logs.
+
+on: { workflow_dispatch: {} }
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: "A) nightly pair (control)"
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/a; . /tmp/a/bin/activate
+          pip install -q --pre -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu || { echo "RESULT_A=PIPFAIL"; exit 0; }
+          M=$(python -c "import mlc_llm" 2>&1 && echo OK || echo FAIL)
+          T=$(python -c "import tvm" 2>&1 && echo OK || echo FAIL)
+          echo "RESULT_A: mlc_llm=$M tvm=$T"
+
+      - name: "B) mlc-llm-nightly + mlc-ai-cpu==0.20.0 (stable old tvm)"
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/b; . /tmp/b/bin/activate
+          pip install -q --pre -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-cpu==0.20.0 || { echo "RESULT_B=PIPFAIL"; exit 0; }
+          M=$(python -c "import mlc_llm" 2>&1 && echo OK || echo FAIL)
+          T=$(python -c "import tvm" 2>&1 && echo OK || echo FAIL)
+          echo "RESULT_B: mlc_llm=$M tvm=$T"
+
+      - name: "C) mlc-llm-nightly alone"
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/c; . /tmp/c/bin/activate
+          pip install -q --pre -f https://mlc.ai/wheels mlc-llm-nightly-cpu || { echo "RESULT_C=PIPFAIL"; exit 0; }
+          M=$(python -c "import mlc_llm" 2>&1 && echo OK || echo FAIL)
+          T=$(python -c "import tvm" 2>&1 && echo OK || echo FAIL)
+          echo "RESULT_C: mlc_llm=$M tvm=$T"
+
+      - name: "D) nightly pair + per-dir libtvm.so symlink (keep tvm pkg)"
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/d; . /tmp/d/bin/activate
+          pip install -q --pre -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu || { echo "RESULT_D=PIPFAIL"; exit 0; }
+          SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          for RT in $(find "$SP" -name libtvm_runtime.so); do D=$(dirname "$RT"); [ -e "$D/libtvm.so" ] || ln -sf libtvm_runtime.so "$D/libtvm.so"; done
+          export LD_LIBRARY_PATH="$SP/mlc_llm/lib:$SP/tvm/lib:$LD_LIBRARY_PATH"
+          M=$(python -c "import mlc_llm" 2>&1 && echo OK || echo FAIL)
+          T=$(python -c "import tvm" 2>&1 && echo OK || echo FAIL)
+          echo "RESULT_D: mlc_llm=$M tvm=$T"
+
+      - name: "E) mlc-ai-cpu==0.20.0 then mlc-llm --no-deps (avoid apache-tvm-ffi pull)"
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/e; . /tmp/e/bin/activate
+          pip install -q --pre -f https://mlc.ai/wheels mlc-ai-cpu==0.20.0 || { echo "RESULT_E=PIPFAIL_AI"; exit 0; }
+          pip install -q --pre -f https://mlc.ai/wheels --no-deps mlc-llm-nightly-cpu || { echo "RESULT_E=PIPFAIL_LLM"; exit 0; }
+          M=$(python -c "import mlc_llm" 2>&1 && echo OK || echo FAIL)
+          T=$(python -c "import tvm" 2>&1 && echo OK || echo FAIL)
+          echo "RESULT_E: mlc_llm=$M tvm=$T"
