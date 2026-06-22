@@ -15,6 +15,9 @@ on:
       name:      { description: "output name",default: "RecursiveMAS-0.5B" }
       upload_hf: { description: "upload to HF",type: boolean, default: true }
 
+permissions:
+  contents: write   # needed to create the Release
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -146,7 +149,7 @@ jobs:
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
 
       - name: Upload weights to Hugging Face (optional; needs a Write token)
-        if: ${{ inputs.upload_hf }}
+        if: ${{ always() && inputs.upload_hf }}
         continue-on-error: true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -1,0 +1,46 @@
+name: Publish prebuilt model
+
+# Fast (~2 min) publish of an ALREADY-BUILT model artifact (from a build-source run)
+# to Hugging Face + a GitHub Release — no 45-min rebuild. Find the run id under the
+# "Build model from source" workflow that has the `*-mlc` artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: "build-source run id holding the artifact", required: true }
+      name:   { description: "model name", default: "RecursiveMAS-0.5B" }
+
+permissions:
+  contents: write   # create the Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" \
+            -n "${{ inputs.name }}-mlc" -D dist-model
+          echo "=== contents ==="; find dist-model -maxdepth 2 | head -30
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Upload to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO:  ${{ vars.HF_REPO }}
+        run: |
+          pip install -q -U huggingface_hub
+          hf upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
+          hf upload "$HF_REPO" dist-model/libs libs --token "$HF_TOKEN"
+          echo "Published -> https://huggingface.co/$HF_REPO"
+
+      - name: Attach wasm to a Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: model-${{ inputs.name }}
+          files: dist-model/libs/*.wasm
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
