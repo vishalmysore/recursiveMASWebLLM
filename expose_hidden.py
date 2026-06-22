@@ -10,9 +10,6 @@ target architecture's model file.
 Usage:  python expose_hidden.py --arch qwen2
 Run it AFTER `pip install mlc-llm-nightly...` and BEFORE `mlc_llm compile`.
 
-The compiled WASM will export these functions ONLY if the export list is manually
-edited in mlc-llm source BEFORE building (patch_source_before_compile.py does this).
-
 NOTE: string-anchor based — fragile across mlc_llm versions. If anchors don't match,
 open the file (path is printed) and apply expose_hidden.md by hand.
 """

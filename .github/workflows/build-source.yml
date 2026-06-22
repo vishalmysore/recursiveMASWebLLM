@@ -129,12 +129,10 @@ jobs:
           mlc_llm gen_config "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
             --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.arch }}" \
             --prefill-chunk-size 1024 -o "$W"
+          # Patch config to export latent functions (get_last_hidden, decode_last_hidden)
+          python patch_config_exports.py "$W/mlc-chat-config.json"
           mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
             -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
-          # KNOWN ISSUE: The WASM exports only standard functions (prefill, decode).
-          # Exporting get_last_hidden / decode_last_hidden requires patching mlc-llm
-          # source BEFORE compile, which is version-specific and complex.
-          # TODO: Add mlc-llm source patch to export latent functions in WASM.
           ls -la "$L" "$W"
 
       # Save the build outputs FIRST and unconditionally, so a bad HF token never
