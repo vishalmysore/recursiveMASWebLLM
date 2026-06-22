@@ -1,0 +1,20 @@
+name: Upload HF model card
+
+# Pushes model-card/README.md to the HF repo root as README.md (the model card).
+on: { workflow_dispatch: {} }
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Upload model card
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO:  ${{ vars.HF_REPO }}
+        run: |
+          pip install -q -U huggingface_hub
+          hf upload "$HF_REPO" model-card/README.md README.md --token "$HF_TOKEN"
+          echo "Model card -> https://huggingface.co/$HF_REPO"
