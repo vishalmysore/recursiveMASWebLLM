@@ -110,11 +110,15 @@ jobs:
       - name: convert_weight + gen_config + compile (WebGPU wasm)
         run: |
           set -e
-          # `mlc_llm compile --device webgpu` links mlc_wasm_runtime.bc, which must be
-          # built first from mlc-llm/web (emcc). It's located via MLC_LLM_SOURCE_DIR.
+          # `mlc_llm compile --device webgpu` links several wasm bitcode runtimes:
+          #  - mlc_wasm_runtime.bc  (from mlc-llm/web; found via MLC_LLM_SOURCE_DIR)
+          #  - wasm_runtime.bc / tvmjs_support.bc / webgpu_runtime.bc  (from tvm/web;
+          #    found via TVM's find_lib_path, which searches tvm/build -> copy them there)
           export MLC_LLM_SOURCE_DIR="$PWD/mlc-llm"
           (cd mlc-llm/web && TVM_SOURCE_DIR="$TVM_HOME" make dist/wasm/mlc_wasm_runtime.bc)
-          ls -la mlc-llm/web/dist/wasm/
+          (cd "$TVM_HOME/web" && make dist/wasm/wasm_runtime.bc dist/wasm/tvmjs_support.bc dist/wasm/webgpu_runtime.bc)
+          cp "$TVM_HOME"/web/dist/wasm/*.bc "$TVM_HOME/build/"
+          ls -la "$TVM_HOME"/build/*.bc mlc-llm/web/dist/wasm/
           OUT=dist-model; W="$OUT/${{ inputs.name }}-MLC"; L="$OUT/libs"
           mkdir -p "$W" "$L"
           mlc_llm convert_weight "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
