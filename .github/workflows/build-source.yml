@@ -129,6 +129,8 @@ jobs:
           mlc_llm gen_config "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
             --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.arch }}" \
             --prefill-chunk-size 1024 -o "$W"
+          # Patch config to export latent functions (get_last_hidden, decode_last_hidden)
+          python patch_config_exports.py "$W/mlc-chat-config.json"
           mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
             -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
           ls -la "$L" "$W"
