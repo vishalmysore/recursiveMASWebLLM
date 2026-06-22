@@ -1,0 +1,26 @@
+name: Check HF upload
+
+# Fast (~1 min) probe to debug the Hugging Face token/permissions without running
+# the full ~45-min model build. Tells you WHICH account the token belongs to (the
+# usual cause of a 403 namespace error) and whether it can create + upload.
+
+on: { workflow_dispatch: {} }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: HF token diagnostics + test upload
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO:  ${{ vars.HF_REPO }}
+        run: |
+          pip install -q -U huggingface_hub
+          python -c "import huggingface_hub as h; print('hf_hub', h.__version__)"
+          echo "HF_REPO=$HF_REPO"
+          echo '--- which account/permissions does the token have? ---'
+          python -c "import os; from huggingface_hub import whoami; w=whoami(token=os.environ['HF_TOKEN']); print('TOKEN_USER:', w.get('name')); print('ORGS:', [o.get('name') for o in w.get('orgs', [])]); print('AUTH:', w.get('auth'))" || echo "WHOAMI_FAILED -> token invalid/expired"
+          echo '--- try create_repo + upload a tiny test file ---'
+          python -c "import os; from huggingface_hub import create_repo, upload_file; r=os.environ['HF_REPO']; t=os.environ['HF_TOKEN']; create_repo(r, token=t, repo_type='model', exist_ok=True, private=False); open('HELLO.txt','w').write('hf upload check ok'); upload_file(path_or_fileobj='HELLO.txt', path_in_repo='HELLO.txt', repo_id=r, token=t); print('UPLOAD_OK -> https://huggingface.co/'+r)"
