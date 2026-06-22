@@ -130,20 +130,25 @@ jobs:
             -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
           ls -la "$L" "$W"
 
-      - name: Upload weights to Hugging Face
-        if: ${{ inputs.upload_hf }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO:  ${{ vars.HF_REPO }}
-        run: hf upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
-
-      - name: Upload artifacts
+      # Save the build outputs FIRST and unconditionally, so a bad HF token never
+      # loses a ~45-min build. The .wasm is downloadable from the run's artifacts.
+      - name: Upload artifacts (wasm + weights)
+        if: always()
         uses: actions/upload-artifact@v4
         with: { name: "${{ inputs.name }}-mlc", path: dist-model, retention-days: 14 }
 
       - name: Attach wasm to a Release
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: model-${{ inputs.name }}
           files: dist-model/libs/*.wasm
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+
+      - name: Upload weights to Hugging Face (optional; needs a Write token)
+        if: ${{ inputs.upload_hf }}
+        continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO:  ${{ vars.HF_REPO }}
+        run: hf upload "$HF_REPO" "dist-model/${{ inputs.name }}-MLC" . --token "$HF_TOKEN"
