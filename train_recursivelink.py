@@ -117,15 +117,16 @@ def inner_loop(model, tok, link, texts, device, steps=300, lr=1e-3):
         pred = link(h)
         # Direction AND magnitude. Cosine alone is scale-invariant, so a link trained
         # only on it can emit a correctly-pointed but wrongly-scaled vector — and a
-        # pooled last-hidden is ~30-50x larger than an input embedding. Injecting an
-        # out-of-scale vector is exactly what derails generation in the browser.
+        # pooled last-hidden is far larger than an input embedding. Use a RELATIVE
+        # magnitude term (ratio→1) so it stays O(1) and doesn't swamp the cosine loss.
         cos = (1 - F.cosine_similarity(pred, target, dim=-1)).mean()
-        mag = F.l1_loss(pred.norm(dim=-1), target.norm(dim=-1))
-        loss = cos + 0.1 * mag
+        pn, tn = pred.norm(dim=-1), target.norm(dim=-1)
+        mag = (pn / (tn + 1e-6) - 1.0).abs().mean()
+        loss = cos + mag
         opt.zero_grad(); loss.backward(); opt.step()
         if step % 25 == 0:
             print(f"  [inner] step {step:4d}  loss {loss.item():.4f} "
-                  f"(cos {cos.item():.4f}  mag {mag.item():.3f})")
+                  f"(cos {cos.item():.4f}  mag {mag.item():.4f})")
     return link
 
 
@@ -154,17 +155,27 @@ def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps
     for step in range(steps):
         text, answer = data[step % len(data)]
         ids = tok(text, return_tensors="pt", truncation=True, max_length=64).input_ids.to(device)
-        labels = tok(answer, return_tensors="pt").input_ids.to(device)
+        labels = tok(answer, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+        A = labels.shape[1]
+        if A == 0:
+            continue
+        ans_emb = emb(labels)                                   # [1, A, hidden]
         with torch.no_grad():
             latent = _pooled_hidden(model, input_ids=ids)       # upstream pooled latent
-        inp = None
+        loss = None
         for r in range(rounds):
             tok_emb = links[r % len(links)](latent)             # link maps latent -> 1 token
-            inp = torch.cat([tok_emb, pe], dim=1) if pe is not None else tok_emb
+            ctx = torch.cat([tok_emb, pe], dim=1) if pe is not None else tok_emb
             if r < rounds - 1:
-                latent = _pooled_hidden(model, inputs_embeds=inp)
-        logits = model(inputs_embeds=inp).logits[:, -labels.shape[1]:, :]
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+                latent = _pooled_hidden(model, inputs_embeds=ctx)
+            else:
+                # Final round: teacher-force the answer so we have answer-length logits.
+                # inp = [latent token] (+ prompt) + [answer embeddings]; the logits that
+                # PREDICT the answer are the A positions just before each answer token.
+                inp = torch.cat([ctx, ans_emb], dim=1)          # [1, 1(+P)+A, hidden]
+                logits = model(inputs_embeds=inp).logits        # [1, T, vocab]
+                ans_logits = logits[:, -A - 1:-1, :]            # [1, A, vocab]
+                loss = F.cross_entropy(ans_logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
         opt.zero_grad(); loss.backward(); opt.step()
         if step % 25 == 0:
             print(f"  [outer] step {step:4d}  ce {loss.item():.4f}")
