@@ -42,7 +42,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class RecursiveLink(nn.Module):
-    """Two-layer residual projection. target==source for the inner link."""
+    """Residual projection in a NORMALIZED hidden space, then a learnable scale.
+
+    A pooled last-hidden is hundreds of times larger than an input embedding, so a
+    plain `h + MLP(h)` residual can never bridge the gap (the fixed h swamps the small
+    MLP — inner loss won't converge). Instead: normalize h to unit length, learn a
+    direction correction there, then rescale to the embedding magnitude with one
+    learnable scalar. Direction and magnitude are decoupled and well-conditioned."""
     def __init__(self, source_dim, target_dim, bottleneck=256):
         super().__init__()
         self.w1 = nn.Linear(source_dim, bottleneck, bias=True)
@@ -50,12 +56,14 @@ class RecursiveLink(nn.Module):
         # residual branch: identity when dims match (inner), else a learned map (outer)
         self.w3 = (nn.Identity() if source_dim == target_dim
                    else nn.Linear(source_dim, target_dim, bias=False))
-        # start near identity so training only learns the *correction*
-        nn.init.zeros_(self.w2.weight); nn.init.zeros_(self.w2.bias)
+        self.scale = nn.Parameter(torch.tensor(1.0))    # learns the embedding magnitude
+        nn.init.zeros_(self.w2.weight); nn.init.zeros_(self.w2.bias)   # start near identity
 
     def forward(self, h):                      # h: [..., source_dim]
+        hn = h / (h.norm(dim=-1, keepdim=True) + 1e-6)   # kill the scale gap
         # tanh-approx GELU to match recursive-link.js (export sets "gelu":"tanh")
-        return self.w3(h) + self.w2(F.gelu(self.w1(h), approximate="tanh"))
+        out = self.w3(hn) + self.w2(F.gelu(self.w1(hn), approximate="tanh"))
+        return self.scale * out
 
 
 def get_io(model):
@@ -225,11 +233,13 @@ def evaluate(model, tok, links, device, agent_prompt="", prompts=None, max_new=4
 def export(links, hidden, path="recursivelink.json"):
     def dump(lk):
         d = {"w1": lk.w1.weight.detach().cpu().tolist(), "b1": lk.w1.bias.detach().cpu().tolist(),
-             "w2": lk.w2.weight.detach().cpu().tolist(), "b2": lk.w2.bias.detach().cpu().tolist()}
+             "w2": lk.w2.weight.detach().cpu().tolist(), "b2": lk.w2.bias.detach().cpu().tolist(),
+             "scale": float(lk.scale.detach().cpu())}
         if isinstance(lk.w3, nn.Linear):
             d["w3"] = lk.w3.weight.detach().cpu().tolist()
         return d
-    obj = {"hidden": hidden, "gelu": "tanh", "links": [dump(lk) for lk in links]}
+    # "norm": true tells recursive-link.js to unit-normalize h before applying the link.
+    obj = {"hidden": hidden, "gelu": "tanh", "norm": True, "links": [dump(lk) for lk in links]}
     with open(path, "w") as f:
         json.dump(obj, f)
     print(f"==> wrote {path}  ({len(links)} link(s), hidden={hidden})")
@@ -244,6 +254,7 @@ def load_links_json(path, hidden, rounds, device):
         with torch.no_grad():
             lk.w1.weight.copy_(torch.tensor(d["w1"])); lk.w1.bias.copy_(torch.tensor(d["b1"]))
             lk.w2.weight.copy_(torch.tensor(d["w2"])); lk.w2.bias.copy_(torch.tensor(d["b2"]))
+            lk.scale.copy_(torch.tensor(float(d.get("scale", 1.0))))
             if "w3" in d and isinstance(lk.w3, nn.Linear):
                 lk.w3.weight.copy_(torch.tensor(d["w3"]))
         mods.append(lk)
