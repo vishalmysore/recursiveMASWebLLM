@@ -138,17 +138,18 @@ def inner_loop(model, tok, link, texts, device, steps=300, lr=1e-3):
     return link
 
 
-def _pooled_hidden(model, *, inputs_embeds=None, input_ids=None):
+def _last_hidden(model, *, inputs_embeds=None, input_ids=None):
     out = (model(inputs_embeds=inputs_embeds, output_hidden_states=True)
            if inputs_embeds is not None
            else model(input_ids, output_hidden_states=True))
-    return out.hidden_states[-1].mean(dim=1, keepdim=True)   # [1, 1, hidden]
+    return out.hidden_states[-1]                             # [1, seq, hidden] (full, no pool)
 
 
 def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps=300, lr=5e-4):
-    """Co-optimize the loop the SAME way the app injects (latent-chain.js): ONE pooled
-    latent vector, mapped by the link, prepended to the agent prompt, re-pooled each
-    round; the final round decodes the answer."""
+    """Co-optimize the loop the SAME way the app injects (latent-chain.js): the FULL
+    last-hidden SEQUENCE, mapped per-position by the link, prepended to the agent
+    prompt, re-read each round; the final round decodes the answer. No mean-pooling —
+    the sequence carries per-token detail, so the link can't collapse to a constant."""
     params = [p for lk in links for p in lk.parameters()]
     opt = torch.optim.AdamW(params, lr=lr)
     emb = get_io(model)
@@ -169,18 +170,18 @@ def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps
             continue
         ans_emb = emb(labels)                                   # [1, A, hidden]
         with torch.no_grad():
-            latent = _pooled_hidden(model, input_ids=ids)       # upstream pooled latent
+            latent = _last_hidden(model, input_ids=ids)         # [1, seq, hidden] full, no pool
         loss = None
         for r in range(rounds):
-            tok_emb = links[r % len(links)](latent)             # link maps latent -> 1 token
-            ctx = torch.cat([tok_emb, pe], dim=1) if pe is not None else tok_emb
+            linked = links[r % len(links)](latent)              # per-position link [1, S, hidden]
+            ctx = torch.cat([linked, pe], dim=1) if pe is not None else linked
             if r < rounds - 1:
-                latent = _pooled_hidden(model, inputs_embeds=ctx)
+                latent = _last_hidden(model, inputs_embeds=ctx)
             else:
                 # Final round: teacher-force the answer so we have answer-length logits.
-                # inp = [latent token] (+ prompt) + [answer embeddings]; the logits that
+                # inp = [linked latent seq] (+ prompt) + [answer embeds]; the logits that
                 # PREDICT the answer are the A positions just before each answer token.
-                inp = torch.cat([ctx, ans_emb], dim=1)          # [1, 1(+P)+A, hidden]
+                inp = torch.cat([ctx, ans_emb], dim=1)          # [1, S(+P)+A, hidden]
                 logits = model(inputs_embeds=inp).logits        # [1, T, vocab]
                 ans_logits = logits[:, -A - 1:-1, :]            # [1, A, vocab]
                 loss = F.cross_entropy(ans_logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
@@ -220,7 +221,7 @@ def evaluate(model, tok, links, device, agent_prompt="", prompts=None, max_new=4
     print("If the link helps, LINK should read better than RAW.\n")
     for q in prompts:
         ids = tok(q, return_tensors="pt").input_ids.to(device)
-        latent = model(ids, output_hidden_states=True).hidden_states[-1].mean(1, keepdim=True)
+        latent = model(ids, output_hidden_states=True).hidden_states[-1]   # [1, seq, hidden] full
         raw = torch.cat([latent, pe], 1) if pe is not None else latent
         lk = links[-1](latent)
         lk = torch.cat([lk, pe], 1) if pe is not None else lk
