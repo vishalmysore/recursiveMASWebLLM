@@ -17,6 +17,9 @@ on:
       arch:
         description: "mlc_llm model arch (must match expose_hidden.py)"
         default: "qwen2"
+      conv_template:
+        description: "mlc_llm chat template (NOT always == arch: llama->llama-3, gemma2->gemma_instruction, phi3->phi-3)"
+        default: "qwen2"
       quant:
         description: "Quantization"
         default: "q4f16_1"
@@ -92,6 +95,8 @@ jobs:
         run: python expose_hidden.py --arch "${{ inputs.arch }}"
 
       - name: Download base weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # required for gated repos (Llama, Gemma)
         run: |
           hf download "${{ inputs.model_hf }}" --local-dir "hf/${{ inputs.name }}"
 
@@ -103,8 +108,9 @@ jobs:
           mlc_llm convert_weight "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
             --model-type "${{ inputs.arch }}" -o "$W"
           mlc_llm gen_config "hf/${{ inputs.name }}" --quantization "${{ inputs.quant }}" \
-            --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.arch }}" \
+            --model-type "${{ inputs.arch }}" --conv-template "${{ inputs.conv_template }}" \
             --prefill-chunk-size 1024 -o "$W"
+          python patch_config_exports.py "$W/mlc-chat-config.json"
           mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
             -o "$L/${{ inputs.name }}-${{ inputs.quant }}-webgpu.wasm"
           ls -la "$L" "$W"

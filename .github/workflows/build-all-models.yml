@@ -1,0 +1,154 @@
+name: Build ALL RecursiveMAS models
+
+# One dispatch → a build matrix that compiles every supported base model in parallel.
+# Each matrix entry pins the 4 coupled knobs that must agree:
+#   model_hf  – HF base repo
+#   arch      – mlc_llm --model-type  (also what expose_hidden.py patches)
+#   conv      – mlc_llm --conv-template (NOT always == arch; that was the old bug)
+#   name      – output / Release / artifact name
+#
+# Same CPU-only pipeline as build-model.yml (compile is codegen, no GPU). See README.md.
+# ⚠️ BEST-EFFORT SCAFFOLD — the MLC nightly + per-arch patch anchors commonly need a
+# debugging pass before going green. Treat the first run per arch as that pass.
+
+on:
+  workflow_dispatch:
+    inputs:
+      quant:
+        description: "Quantization"
+        default: "q4f16_1"
+      train_link:
+        description: "Also CPU-train the RecursiveLink per model (slow; default off)"
+        type: boolean
+        default: false
+      upload_hf:
+        description: "Upload weights to HF (needs HF_TOKEN secret + HF_NAMESPACE var, e.g. vishalmysore)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false          # one model failing must not cancel the others
+      matrix:
+        include:
+          - model_hf: "Qwen/Qwen2.5-1.5B-Instruct"
+            arch: "qwen2"
+            conv: "qwen2"
+            name: "RecursiveMAS-Qwen2.5-1.5B"
+          - model_hf: "meta-llama/Llama-3.2-1B-Instruct"
+            arch: "llama"
+            conv: "llama-3"
+            name: "RecursiveMAS-Llama3.2-1B"
+          - model_hf: "google/gemma-2-2b-it"
+            arch: "gemma2"
+            conv: "gemma_instruction"
+            name: "RecursiveMAS-Gemma2-2B"
+          - model_hf: "microsoft/Phi-3-mini-4k-instruct"
+            arch: "phi3"
+            conv: "phi-3"
+            name: "RecursiveMAS-Phi3-mini"
+          - model_hf: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            arch: "llama"
+            conv: "llama-2"
+            name: "RecursiveMAS-TinyLlama-1.1B"
+
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with: { version: "3.1.56" }
+
+      - name: Install MLC toolchain (CPU nightly)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre -U -f https://mlc.ai/wheels mlc-llm-nightly-cpu mlc-ai-nightly-cpu
+          pip install -U huggingface_hub
+
+          SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+
+          # Keep ONLY mlc_llm's libtvm_runtime.so; remove tvm's duplicate to avoid the
+          # duplicate-registration SIGABRT (both packages register the same TVM globals).
+          MLC_RT="$SP/mlc_llm/lib/libtvm_runtime.so"
+          if [ -f "$MLC_RT" ]; then
+            find "$SP" -name "libtvm_runtime.so" ! -path "*/mlc_llm/*" -delete
+            [ -d "$SP/tvm" ] && rm -rf "$SP/tvm" || true
+            for dir in $(find "$SP" -name "libtvm_runtime.so" -exec dirname {} \;); do
+              ln -sf libtvm_runtime.so "$dir/libtvm.so"
+            done
+          fi
+
+          export LD_LIBRARY_PATH="$SP/mlc_llm/lib:$LD_LIBRARY_PATH"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          python -c "import mlc_llm; print('✅ mlc_llm imported', mlc_llm.__file__)"
+
+      - name: Patch model definition (expose hidden states)
+        run: python expose_hidden.py --arch "${{ matrix.arch }}"
+
+      - name: Download base weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # required for gated repos (Llama, Gemma)
+        run: |
+          hf download "${{ matrix.model_hf }}" --local-dir "hf/${{ matrix.name }}"
+
+      - name: convert_weight + gen_config + compile (WebGPU wasm)
+        run: |
+          set -e
+          OUT=dist-model; W="$OUT/${{ matrix.name }}-MLC"; L="$OUT/libs"
+          mkdir -p "$W" "$L"
+          mlc_llm convert_weight "hf/${{ matrix.name }}" --quantization "${{ inputs.quant }}" \
+            --model-type "${{ matrix.arch }}" -o "$W"
+          mlc_llm gen_config "hf/${{ matrix.name }}" --quantization "${{ inputs.quant }}" \
+            --model-type "${{ matrix.arch }}" --conv-template "${{ matrix.conv }}" \
+            --prefill-chunk-size 1024 -o "$W"
+          # Declare the latent funcs as wasm entry points before compile.
+          python patch_config_exports.py "$W/mlc-chat-config.json"
+          mlc_llm compile "$W/mlc-chat-config.json" --device webgpu \
+            -o "$L/${{ matrix.name }}-${{ inputs.quant }}-webgpu.wasm"
+          ls -la "$L" "$W"
+
+      - name: Train RecursiveLink (optional, CPU)
+        if: ${{ inputs.train_link }}
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers
+          python train_recursivelink.py --model "${{ matrix.model_hf }}" \
+            --out dist-model/recursivelink.json
+
+      - name: Upload weights to Hugging Face (optional)
+        if: ${{ inputs.upload_hf }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}        # repo secret
+          HF_NAMESPACE: ${{ vars.HF_NAMESPACE }}   # repo variable, e.g. vishalmysore
+        run: |
+          hf upload "$HF_NAMESPACE/${{ matrix.name }}-MLC" \
+            "dist-model/${{ matrix.name }}-MLC" . --token "$HF_TOKEN"
+
+      - name: Upload build artifacts (wasm + weights + link)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-mlc
+          path: dist-model
+          retention-days: 14
+
+      - name: Attach wasm to a Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: model-${{ matrix.name }}
+          files: |
+            dist-model/libs/*.wasm
+            dist-model/recursivelink.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
