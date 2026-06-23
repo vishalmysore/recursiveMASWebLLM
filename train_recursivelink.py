@@ -131,7 +131,9 @@ def inner_loop(model, tok, link, texts, device, steps=300, lr=1e-3):
         pn, tn = pred.norm(dim=-1), target.norm(dim=-1)
         mag = (pn / (tn + 1e-6) - 1.0).abs().mean()
         loss = cos + mag
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(link.parameters(), 1.0)
+        opt.step()
         if step % 25 == 0:
             print(f"  [inner] step {step:4d}  loss {loss.item():.4f} "
                   f"(cos {cos.item():.4f}  mag {mag.item():.4f})")
@@ -145,7 +147,7 @@ def _last_hidden(model, *, inputs_embeds=None, input_ids=None):
     return out.hidden_states[-1]                             # [1, seq, hidden] (full, no pool)
 
 
-def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps=300, lr=5e-4):
+def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps=300, lr=3e-4):
     """Co-optimize the loop the SAME way the app injects (latent-chain.js): the FULL
     last-hidden SEQUENCE, mapped per-position by the link, prepended to the agent
     prompt, re-read each round; the final round decodes the answer. No mean-pooling —
@@ -185,7 +187,9 @@ def outer_loop(model, tok, links, data, device, agent_prompt="", rounds=2, steps
                 logits = model(inputs_embeds=inp).logits        # [1, T, vocab]
                 ans_logits = logits[:, -A - 1:-1, :]            # [1, A, vocab]
                 loss = F.cross_entropy(ans_logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(params, 1.0)     # tame the ce spikes
+        opt.step()
         if step % 25 == 0:
             print(f"  [outer] step {step:4d}  ce {loss.item():.4f}")
     return links
@@ -271,6 +275,7 @@ def main():
     ap.add_argument("--limit", type=int, default=600, help="examples to pull from --dataset")
     ap.add_argument("--inner-steps", type=int, default=300)
     ap.add_argument("--outer-steps", type=int, default=300)
+    ap.add_argument("--outer-lr", type=float, default=3e-4)
     ap.add_argument("--agent-prompt", default="",
                     help="optional role framing prepended after the latent token (kept minimal)")
     ap.add_argument("--out", default="recursivelink.json")
@@ -306,7 +311,8 @@ def main():
         lk.load_state_dict(link.state_dict())   # init each round from the warm-start
     print("== Stage 2: outer loop (co-optimize the looped system) ==")
     outer_loop(model, tok, links, train_pairs, device,
-               agent_prompt=args.agent_prompt, rounds=args.rounds, steps=args.outer_steps)
+               agent_prompt=args.agent_prompt, rounds=args.rounds,
+               steps=args.outer_steps, lr=args.outer_lr)
 
     export(links, hidden, args.out)
     if args.do_eval:
