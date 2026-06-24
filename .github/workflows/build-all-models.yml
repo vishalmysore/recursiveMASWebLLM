@@ -197,4 +197,24 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}        # repo secret
           HF_NAMESPACE: ${{ vars.HF_NAMESPACE }}   # repo variable, e.g. vishalmysore
-        run: hf upload "$HF_NAMESPACE/${{ matrix.name }}-MLC" "dist-model/${{ matrix.name }}-MLC" . --token "$HF_TOKEN"
+        run: |
+          set -euo pipefail
+          # Guard the two config values so a missing one gives a clear message
+          # instead of `hf upload "/${name}-MLC"` -> "Repo id must use alphanumeric
+          # chars... cannot start with '-' or '.'" (the leading-slash error).
+          if [ -z "${HF_NAMESPACE:-}" ]; then
+            echo "::error::HF upload skipped: repo VARIABLE 'HF_NAMESPACE' is not set."
+            echo "Set it under Settings -> Secrets and variables -> Actions -> Variables (e.g. HF_NAMESPACE=vishalmysore)."
+            exit 1
+          fi
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "::error::HF upload skipped: repo SECRET 'HF_TOKEN' is not set (needs a Hugging Face Write token)."
+            echo "Set it under Settings -> Secrets and variables -> Actions -> Secrets."
+            exit 1
+          fi
+          REPO="$HF_NAMESPACE/${{ matrix.name }}-MLC"
+          echo "Uploading weights + wasm to https://huggingface.co/$REPO"
+          hf upload "$REPO" "dist-model/${{ matrix.name }}-MLC" . --token "$HF_TOKEN"
+          # Make the HF repo self-contained: also push the WebGPU model library.
+          hf upload "$REPO" "dist-model/libs/${{ matrix.name }}-${{ inputs.quant }}-webgpu.wasm" \
+            "libs/${{ matrix.name }}-${{ inputs.quant }}-webgpu.wasm" --token "$HF_TOKEN"

@@ -1,5 +1,6 @@
 # build outputs / downloads (published to Releases + Hugging Face, not committed)
 hf/
+hf-upload/
 dist-model/
 *.wasm
 recursivelink.json
